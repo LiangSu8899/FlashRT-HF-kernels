@@ -89,6 +89,19 @@ hardware claim.
 
 ## Local validation log
 
+2026-08-24 (ROCm owner preflight, commit `4fa73b2`):
+
+- The repository static prebuild check and the exact pinned-builder
+  `check-config` gate passed for
+  `torch211-cxx11-rocm72-x86_64-linux`. Fork CI run `32752196310` then stopped
+  at the expected empty fork `HF_TOKEN`; it did not publish an artifact.
+- The source extension compiled cleanly for `gfx950` with PyTorch 2.11 / ROCm
+  7.2 and the registration header from the package-pinned kernel-builder
+  commit `432702bfbfbb17d3a1bd2c2743d004e21e769ab7`. This was a cross-compile
+  gate on a non-AMD worker, not launch or correctness evidence. MI350X
+  correctness, compile/capture, paired performance, and installed-artifact
+  gates remain pending.
+
 2026-08-06:
 
 - The expanded source gate passed on NVIDIA Thor (SM110), PyTorch
