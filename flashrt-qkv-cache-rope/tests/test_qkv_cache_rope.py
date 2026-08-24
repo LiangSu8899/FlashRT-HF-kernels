@@ -17,7 +17,7 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "flashrt-qkv-cache-rope"
-REGISTRATION_INCLUDE = (
+_DEFAULT_REGISTRATION_INCLUDE = (
     ROOT.parent
     / "kernels"
     / "kernel-builder"
@@ -25,6 +25,11 @@ REGISTRATION_INCLUDE = (
     / "pyproject"
     / "templates"
     / "torch"
+)
+REGISTRATION_INCLUDE = Path(
+    os.environ.get(
+        "KERNEL_BUILDER_TORCH_INCLUDE", str(_DEFAULT_REGISTRATION_INCLUDE)
+    )
 )
 
 
@@ -489,18 +494,40 @@ def load_source_ops() -> SourceOps:
     if not REGISTRATION_INCLUDE.is_dir():
         raise RuntimeError(f"missing kernel-builder registration include: {REGISTRATION_INCLUDE}")
     _preload_cublaslt()
-    os.environ.setdefault("TORCH_CUDA_ARCH_LIST", _current_arch_list())
-    namespace = "flashrt_qkv_cache_rope_test"
-    load(
-        name=namespace,
-        sources=[
+    is_rocm = torch.version.hip is not None
+    if is_rocm:
+        arch = os.environ.get("PYTORCH_ROCM_ARCH")
+        if not arch:
+            arch = torch.cuda.get_device_properties(0).gcnArchName.split(":", 1)[0]
+        os.environ.setdefault("PYTORCH_ROCM_ARCH", arch)
+        sources = [
+            str(PACKAGE / "torch-ext" / "torch_binding.cpp"),
+            str(PACKAGE / "csrc" / "rocm" / "qkv_cache_rope_rocm.hip"),
+        ]
+        cflags = ["-O3", "-DROCM_KERNEL"]
+        device_cflags = ["-O3", "-DROCM_KERNEL"]
+    else:
+        os.environ.setdefault("TORCH_CUDA_ARCH_LIST", _current_arch_list())
+        sources = [
             str(PACKAGE / "torch-ext" / "torch_binding.cpp"),
             str(PACKAGE / "csrc" / "qkv_cache_rope.cu"),
             str(PACKAGE / "csrc" / "cosmos_edge" / "cosmos3_edge_misc.cu"),
-        ],
+        ]
+        cflags = ["-O3", "-DCUDA_KERNEL", "-DFLASHRT_HAVE_COSMOS3_EDGE=1"]
+        device_cflags = [
+            "-O3",
+            "--expt-relaxed-constexpr",
+            "-DCUDA_KERNEL",
+            "-DFLASHRT_HAVE_COSMOS3_EDGE=1",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        ]
+    namespace = "flashrt_qkv_cache_rope_test"
+    load(
+        name=namespace,
+        sources=sources,
         extra_include_paths=[str(PACKAGE / "csrc"), str(REGISTRATION_INCLUDE)],
-        extra_cflags=["-O3", "-DCUDA_KERNEL", "-DFLASHRT_HAVE_COSMOS3_EDGE=1"],
-        extra_cuda_cflags=["-O3", "--expt-relaxed-constexpr", "-DCUDA_KERNEL", "-DFLASHRT_HAVE_COSMOS3_EDGE=1", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__"],
+        extra_cflags=cflags,
+        extra_cuda_cflags=device_cflags,
         verbose=False,
     )
     return SourceOps(namespace)
@@ -1007,7 +1034,7 @@ def run_fp16_kvcache_shape(ops, label: str, seq_len: int, device_position: bool)
         print(f"PASS {label}/cuda_graph bitwise replay")
 
 
-def run_unaligned_kvcache_fallback(ops) -> None:
+def run_unaligned_kvcache_fallback(ops, *, include_fp16: bool = True) -> None:
     batch, seq_len, q_heads, kv_heads, head_dim = 1, 3, 8, 1, 256
     width = (q_heads + 2 * kv_heads) * head_dim
 
@@ -1019,10 +1046,10 @@ def run_unaligned_kvcache_fallback(ops) -> None:
             raise AssertionError("failed to construct unaligned contiguous tensor")
         return value
 
-    for dtype, method in (
-        (torch.bfloat16, ops.qkv_split_rope_kvcache_bf16),
-        (torch.float16, ops.qkv_split_rope_kvcache_fp16),
-    ):
+    dtype_methods = [(torch.bfloat16, ops.qkv_split_rope_kvcache_bf16)]
+    if include_fp16:
+        dtype_methods.append((torch.float16, ops.qkv_split_rope_kvcache_fp16))
+    for dtype, method in dtype_methods:
         packed = offset_tensor((batch, seq_len, width), dtype).normal_()
         rope = offset_tensor((seq_len, head_dim), dtype)
         angles = torch.randn((seq_len, head_dim // 2), device="cuda")
@@ -1040,6 +1067,91 @@ def run_unaligned_kvcache_fallback(ops) -> None:
         assert_close_distribution(f"unaligned/{dtype}/q", q_out, exp_q)
         assert_close_distribution(f"unaligned/{dtype}/k", k_cache[:, 1:4], exp_k)
         assert_close_distribution(f"unaligned/{dtype}/v", v_cache[:, 1:4], exp_v)
+
+
+def run_kvcache_compile_capture(ops) -> None:
+    batch, seq_len, q_heads, kv_heads, head_dim = 1, 10, 8, 1, 256
+    width = (q_heads + 2 * kv_heads) * head_dim
+    packed = torch.randn(
+        (batch, seq_len, width), device="cuda", dtype=torch.bfloat16
+    )
+    rope = make_interleaved_rope(seq_len, head_dim)
+    q_out = torch.empty(
+        (batch, seq_len, q_heads, head_dim),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    k_cache = torch.full(
+        (batch, 32, kv_heads, head_dim),
+        -7.0,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    v_cache = torch.full_like(k_cache, -9.0)
+
+    def call(packed_arg, rope_arg, q_arg, k_arg, v_arg):
+        return ops.qkv_split_rope_kvcache_bf16(
+            packed_arg,
+            rope_arg,
+            q_heads,
+            kv_heads,
+            head_dim,
+            5,
+            q_arg,
+            k_arg,
+            v_arg,
+        )
+
+    compiled = torch.compile(call, fullgraph=True)
+    compiled(packed, rope, q_out, k_cache, v_cache)
+    torch.cuda.synchronize()
+    exp_q, exp_k, exp_v = ref_qkv_split_rope_kvcache(
+        packed, rope, q_heads, kv_heads, head_dim
+    )
+    assert_close_distribution("rocm_compile/q", q_out, exp_q)
+    assert_close_distribution("rocm_compile/k", k_cache[:, 5:15], exp_k)
+    assert_close_distribution("rocm_compile/v", v_cache[:, 5:15], exp_v)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        call(packed, rope, q_out, k_cache, v_cache)
+    graph.replay()
+    torch.cuda.synchronize()
+    first = (q_out.clone(), k_cache[:, 5:15].clone(), v_cache[:, 5:15].clone())
+    graph.replay()
+    torch.cuda.synchronize()
+    second = (q_out.clone(), k_cache[:, 5:15].clone(), v_cache[:, 5:15].clone())
+    if not all(torch.equal(a, b) for a, b in zip(first, second)):
+        raise AssertionError("ROCm graph replay is not bitwise deterministic")
+    print("PASS ROCm torch.compile fullgraph and graph replay")
+
+
+def run_kvcache_rejection_tests(ops) -> None:
+    packed = torch.randn((1, 10, 2560), device="cuda", dtype=torch.bfloat16)
+    rope = make_interleaved_rope(10, 256)
+    q_out = torch.empty((1, 10, 8, 256), device="cuda", dtype=torch.bfloat16)
+    k_cache = torch.empty((1, 12, 1, 256), device="cuda", dtype=torch.bfloat16)
+    v_cache = torch.empty_like(k_cache)
+    expect_runtime_error(
+        "rocm_kvcache/bounds",
+        lambda: ops.qkv_split_rope_kvcache_bf16(
+            packed, rope, 8, 1, 256, 4, q_out, k_cache, v_cache
+        ),
+    )
+    expect_runtime_error(
+        "rocm_kvcache/packed_width",
+        lambda: ops.qkv_split_rope_kvcache_bf16(
+            packed[:, :, :-1].contiguous(),
+            rope,
+            8,
+            1,
+            256,
+            0,
+            q_out,
+            k_cache,
+            v_cache,
+        ),
+    )
 
 
 def run_qk_norm_rope_strided(ops) -> None:
@@ -1348,6 +1460,14 @@ def run(args) -> None:
         raise SystemExit("CUDA is required")
     torch.manual_seed(31)
     ops = load_source_ops() if args.backend == "source" else load_installed_ops(args.artifact)
+    if torch.version.hip is not None:
+        run_kvcache_shape(ops, "pi05_decoder_gqa", 1, 10, 8, 1, 256)
+        run_kvcache_shape(ops, "pi05_prefix_gqa", 1, 712, 8, 1, 256)
+        run_kvcache_shape(ops, "gqa_batch2", 2, 16, 8, 2, 128)
+        run_unaligned_kvcache_fallback(ops, include_fp16=False)
+        run_kvcache_compile_capture(ops)
+        run_kvcache_rejection_tests(ops)
+        return
     shapes = {
         "small": (1, 4, 4, 128),
         "wan_1k": (1, 1024, 24, 128),
@@ -1413,7 +1533,18 @@ def main() -> None:
     parser.add_argument("--artifact", default=None)
     parser.add_argument("--mode", choices=["smoke", "full"], default="full")
     parser.add_argument("--eps", type=float, default=1e-6)
+    parser.add_argument(
+        "--compile-only",
+        action="store_true",
+        help="build the source extension for the selected architecture without launching it",
+    )
     args = parser.parse_args()
+    if args.compile_only:
+        if args.backend != "source":
+            parser.error("--compile-only requires --backend source")
+        load_source_ops()
+        print("PASS source extension compiled")
+        return
     run(args)
 
 

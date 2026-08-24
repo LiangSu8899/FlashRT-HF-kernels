@@ -41,3 +41,8 @@ Local adaptation:
   `[cos0, sin0, ...]` RoPE table contract, but exposes a Tensor layout:
   `packed_qkv=(B,S,(QH+2*KVH)*HD)`, `q_out=(B,S,QH,HD)`, and
   `k_cache/v_cache=(B,max_S,KVH,HD)`.
+- The ROCm implementation is an architecture port of that public GQA cache
+  contract, not a second API. It uses HIP BF16 scalar and aligned 16-byte
+  vector paths, preserves the adjacent-pair RoPE arithmetic and dense cache
+  layout, and is built only for `gfx950`. Other package symbols remain
+  CUDA-only until each receives its own correctness and performance evidence.

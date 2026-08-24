@@ -19,7 +19,7 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "flashrt-qkv-cache-rope"
-REGISTRATION_INCLUDE = (
+_DEFAULT_REGISTRATION_INCLUDE = (
     ROOT.parent
     / "kernels"
     / "kernel-builder"
@@ -27,6 +27,11 @@ REGISTRATION_INCLUDE = (
     / "pyproject"
     / "templates"
     / "torch"
+)
+REGISTRATION_INCLUDE = Path(
+    os.environ.get(
+        "KERNEL_BUILDER_TORCH_INCLUDE", str(_DEFAULT_REGISTRATION_INCLUDE)
+    )
 )
 
 SHAPES = {
@@ -296,17 +301,35 @@ def load_source_ops() -> SourceOps:
     if not REGISTRATION_INCLUDE.is_dir():
         raise RuntimeError(f"missing kernel-builder registration include: {REGISTRATION_INCLUDE}")
     _preload_cublaslt()
-    os.environ.setdefault("TORCH_CUDA_ARCH_LIST", _current_arch_list())
+    is_rocm = torch.version.hip is not None
+    if is_rocm:
+        arch = os.environ.get("PYTORCH_ROCM_ARCH")
+        if not arch:
+            arch = torch.cuda.get_device_properties(0).gcnArchName.split(":", 1)[0]
+        os.environ.setdefault("PYTORCH_ROCM_ARCH", arch)
+        sources = [
+            str(PACKAGE / "torch-ext" / "torch_binding.cpp"),
+            str(PACKAGE / "csrc" / "rocm" / "qkv_cache_rope_rocm.hip"),
+        ]
+        cflags = ["-O3", "-DROCM_KERNEL"]
+        device_cflags = ["-O3", "-DROCM_KERNEL"]
+    else:
+        os.environ.setdefault("TORCH_CUDA_ARCH_LIST", _current_arch_list())
+        sources = [
+            str(PACKAGE / "torch-ext" / "torch_binding.cpp"),
+            str(PACKAGE / "csrc" / "qkv_cache_rope.cu"),
+        ]
+        cflags = ["-O3", "-DCUDA_KERNEL"]
+        device_cflags = [
+            "-O3", "--expt-relaxed-constexpr", "-DCUDA_KERNEL"
+        ]
     namespace = "flashrt_qkv_cache_rope_benchmark"
     load(
         name=namespace,
-        sources=[
-            str(PACKAGE / "torch-ext" / "torch_binding.cpp"),
-            str(PACKAGE / "csrc" / "qkv_cache_rope.cu"),
-        ],
+        sources=sources,
         extra_include_paths=[str(PACKAGE / "csrc"), str(REGISTRATION_INCLUDE)],
-        extra_cflags=["-O3", "-DCUDA_KERNEL"],
-        extra_cuda_cflags=["-O3", "--expt-relaxed-constexpr", "-DCUDA_KERNEL"],
+        extra_cflags=cflags,
+        extra_cuda_cflags=device_cflags,
         verbose=False,
     )
     return SourceOps(namespace)
@@ -890,17 +913,33 @@ def main() -> None:
         raise SystemExit("CUDA is required")
     torch.manual_seed(37)
     ops = load_source_ops() if args.backend == "source" else load_installed_ops(args.artifact)
-    results = [run_one(ops, name, SHAPES[name], args) for name in SHAPE_GROUPS[args.shapes]]
-    if args.shapes in ("smoke", "all"):
+    if torch.version.hip is not None:
+        results = [
+            run_kvcache_gqa(
+                ops, "pi05_decoder_gqa_kvcache", 1, 10, 8, 1, 256, args
+            ),
+            run_kvcache_gqa(
+                ops, "pi05_prefix_gqa_kvcache", 1, 712, 8, 1, 256, args
+            ),
+            run_kvcache_gqa(
+                ops, "gqa_batch2_kvcache", 2, 16, 8, 2, 128, args
+            ),
+        ]
+    else:
+        results = [
+            run_one(ops, name, SHAPES[name], args)
+            for name in SHAPE_GROUPS[args.shapes]
+        ]
+    if torch.version.hip is None and args.shapes in ("smoke", "all"):
         results.append(run_joint3(ops, "joint3_small", 64, 8, 4, 8, 128, args))
         results.append(run_kvcache_gqa(ops, "pi05_decoder_gqa_kvcache", 1, 10, 8, 1, 256, args))
         results.append(run_kvcache_gqa(ops, "pi05_thor_decoder_gqa_kvcache", 1, 50, 8, 1, 256, args))
-    if args.shapes in ("headline", "all"):
+    if torch.version.hip is None and args.shapes in ("headline", "all"):
         results.append(run_joint3(ops, "joint3_vla", 2520, 16, 16, 24, 128, args))
         results.append(run_decode_q(ops, "decode_q_stage_h24", 24, args))
         results.append(run_decode_kv(ops, "decode_kvwrite_h8", 8, False, args))
         results.append(run_decode_kv(ops, "decode_kvwrite_devpos_h8", 8, True, args))
-    if args.shapes == "headline":
+    if torch.version.hip is None and args.shapes == "headline":
         results.append(run_kvcache_gqa(ops, "pi05_decoder_gqa_kvcache", 1, 10, 8, 1, 256, args))
         results.append(run_kvcache_gqa(ops, "pi05_thor_decoder_gqa_kvcache", 1, 50, 8, 1, 256, args))
 

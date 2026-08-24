@@ -5,19 +5,22 @@
 
 #include <limits>
 
-// This package always builds the additive Cosmos3-Edge QK/RoPE surface.
-// kernel-builder compiles the Torch binding separately from CUDA targets, so
-// target-local cuda-flags are not visible while this translation unit parses
-// the public declarations.
-#define FLASHRT_HAVE_COSMOS3_EDGE 1
-
 #if defined(CUDA_KERNEL)
+// This package always builds the additive Cosmos3-Edge QK/RoPE surface on
+// CUDA. kernel-builder compiles the Torch binding separately from native
+// targets, so target-local flags are not visible while this translation unit
+// parses the public declarations.
+#define FLASHRT_HAVE_COSMOS3_EDGE 1
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
-#endif
-
 #include "qkv_cache_rope.cuh"
 #include "cosmos_edge/cosmos3_edge_misc.cuh"
+#elif defined(ROCM_KERNEL)
+#include <c10/core/DeviceGuard.h>
+#include <c10/hip/HIPStream.h>
+#include "rocm/qkv_cache_rope_rocm.h"
+#endif
+
 #include "registration.h"
 #include "torch_binding.h"
 
@@ -588,8 +591,27 @@ void qkv_split_rope_kvcache_bf16(
       head_dim,
       checked_nonnegative_int(cache_offset64, "cache_offset"),
       stream);
+#elif defined(ROCM_KERNEL)
+  c10::OptionalDeviceGuard device_guard(packed_qkv.device());
+  auto stream = c10::hip::getCurrentHIPStream(
+      packed_qkv.get_device()).stream();
+  flash_rt::qkv_cache_rope::qkv_split_rope_kvcache_bf16_rocm(
+      packed_qkv.data_ptr(),
+      rope.data_ptr(),
+      q_out.data_ptr(),
+      k_cache.data_ptr(),
+      v_cache.data_ptr(),
+      checked_int(batch, "batch"),
+      checked_int(seq_len, "seq_len"),
+      checked_int(max_seq_len, "max_seq_len"),
+      q_heads,
+      kv_heads,
+      head_dim,
+      checked_nonnegative_int(cache_offset64, "cache_offset"),
+      stream);
 #else
-  TORCH_CHECK(false, "flashrt-qkv-cache-rope was not built with CUDA support");
+  TORCH_CHECK(false,
+              "qkv_split_rope_kvcache_bf16 requires CUDA or ROCm support");
 #endif
 }
 
@@ -1202,6 +1224,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("qkv_split_joint3_cat_bf16",
            torch::kCUDA,
            &qkv_split_joint3_cat_bf16);
+#elif defined(ROCM_KERNEL)
+  ops.impl("qkv_split_rope_kvcache_bf16",
+           torch::kCUDA,
+           &qkv_split_rope_kvcache_bf16);
 #endif
 }
 

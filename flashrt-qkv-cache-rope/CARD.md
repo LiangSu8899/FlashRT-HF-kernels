@@ -47,13 +47,18 @@ supports different Q and KV head counts.
 The fused bias+RoPE API accepts FP32 half-width or full-width RoPE tables and
 supports even head dimensions from 8 through 256.
 
+ROCm 7.2 `gfx950` builds expose `qkv_split_rope_kvcache_bf16`. The remaining
+symbols are CUDA-only; the ROCm library deliberately leaves them unregistered
+rather than emulating them with multi-op fallbacks.
+
 ## Hardware
 
 - CUDA 12.8+
 - BF16-capable NVIDIA GPUs
+- ROCm 7.2, AMD `gfx950` for `qkv_split_rope_kvcache_bf16`
 
-Current local source validation is on RTX 5090. Broader hardware rows should be
-added after installed-artifact validation.
+Hardware rows are promoted only after source and installed-artifact
+correctness, compile/capture, and paired performance validation.
 
 ## Upstream
 

@@ -64,6 +64,29 @@ Required before publishing this package:
    Add hardware claims only after the same correctness and benchmark commands
    pass on that machine.
 
+### ROCm `gfx950` gate
+
+The ROCm artifact currently contains only `qkv_split_rope_kvcache_bf16`.
+Validate it at the Pi0.5 decoder and prefix rows plus an unrelated batched-GQA
+row:
+
+```bash
+PYTORCH_ROCM_ARCH=gfx950 \
+python flashrt-qkv-cache-rope/tests/test_qkv_cache_rope.py \
+  --backend source --mode full
+
+PYTORCH_ROCM_ARCH=gfx950 \
+python flashrt-qkv-cache-rope/benchmarks/benchmark_rocm_kvcache.py \
+  --backend source --compile-mode max-autotune
+```
+
+The benchmark is paired and alternating. Its baseline is the identical
+split/RoPE/cache-write boundary compiled with
+`torch.compile(fullgraph=True, mode="max-autotune")`; an eager-only comparison
+is not a promotion gate. Repeat both commands with `--backend installed` and
+the exact `torch211-cxx11-rocm72-x86_64-linux` artifact before publishing the
+hardware claim.
+
 ## Local validation log
 
 2026-08-06:

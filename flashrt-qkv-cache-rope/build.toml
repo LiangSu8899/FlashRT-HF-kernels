@@ -2,7 +2,7 @@
 name = "flashrt-qkv-cache-rope"
 license = "Apache-2.0"
 version = 1
-backends = ["cuda"]
+backends = ["cuda", "rocm"]
 
 [general.cuda]
 minver = "12.8"
@@ -32,4 +32,16 @@ src = [
   "csrc/cosmos_edge/cosmos3_edge_misc.cu",
   "csrc/cosmos_edge/cosmos3_edge_misc.cuh",
   "csrc/cosmos_edge/common.cuh",
+]
+
+[kernel.flashrt_qkv_cache_rope_rocm]
+backend = "rocm"
+depends = ["torch"]
+include = ["csrc"]
+rocm-archs = [
+  "gfx950",
+]
+src = [
+  "csrc/rocm/qkv_cache_rope_rocm.hip",
+  "csrc/rocm/qkv_cache_rope_rocm.h",
 ]

@@ -33,10 +33,11 @@ GQA packed QKV -> split Q/K/V -> interleaved RoPE Q/K -> KV cache write
 - `decode_k_norm_rope_kvwrite_bf16(k_pre, v_pre, k_norm_weight, cos, sin, eps=1e-6, k_cache_dst=None, v_cache_dst=None)`
 - `decode_k_norm_rope_kvwrite_devpos_bf16(k_pre, v_pre, k_norm_weight, cos, sin, cur_pos, k_cache, v_cache, eps=1e-6)`
 
-The BF16 and FP16 cache writers automatically use a 16-byte vectorized path
-for aligned head dimensions and buffers, including the PI0.5 Thor
-`B=1, S=50, QH=8, KVH=1, HD=256` shape. Unaligned tensors retain the scalar
-fallback; the public API and output contract are unchanged.
+The BF16 and FP16 CUDA cache writers automatically use a 16-byte vectorized
+path for aligned head dimensions and buffers, including the PI0.5 Thor
+`B=1, S=50, QH=8, KVH=1, HD=256` shape. The ROCm BF16 cache writer provides
+the same aligned/scalar dispatch for `gfx950`. Unaligned tensors retain the
+scalar fallback; the public API and output contract are unchanged.
 
 Tensor conventions:
 
@@ -99,6 +100,15 @@ normalization, and RoPE intermediates.
 The bias+RoPE API is the generic vision/text projection epilogue. It consumes
 one packed GQA or equal-head QKV GEMM output, adds the broadcast bias, applies
 split-half RoPE to Q/K, and writes attention-ready Q/K/V in one launch.
+
+## Backend support
+
+- CUDA 12.8+: all APIs listed above.
+- ROCm 7.2 on `gfx950`: `qkv_split_rope_kvcache_bf16`.
+
+The package metadata is the hardware source of truth. A ROCm build does not
+register CUDA-only implementations, so an unsupported symbol fails explicitly
+instead of silently taking an eager replacement path.
 
 ## Minimal Usage
 
