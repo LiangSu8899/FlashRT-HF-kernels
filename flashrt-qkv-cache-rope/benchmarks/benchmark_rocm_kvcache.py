@@ -86,13 +86,14 @@ def _paired_device_times(kernel_fn, baseline_fn, warmup: int, iters: int):
     )
 
 
-def _make_case(common, batch, seq_len, q_heads, kv_heads, head_dim):
+def _make_case(
+    common, batch, seq_len, q_heads, kv_heads, head_dim, cache_offset
+):
     width = (q_heads + 2 * kv_heads) * head_dim
     packed = torch.randn(
         (batch, seq_len, width), device="cuda", dtype=torch.bfloat16
     )
     rope = common.make_interleaved_rope(seq_len, head_dim)
-    cache_offset = 2
     max_seq_len = cache_offset + seq_len + 2
     q_out = torch.empty(
         (batch, seq_len, q_heads, head_dim),
@@ -109,9 +110,9 @@ def _make_case(common, batch, seq_len, q_heads, kv_heads, head_dim):
 
 
 def _benchmark_shape(common, ops, shape, args):
-    name, batch, seq_len, q_heads, kv_heads, head_dim = shape
+    name, batch, seq_len, q_heads, kv_heads, head_dim, cache_offset = shape
     packed, rope, offset, q_out, k_cache, v_cache = _make_case(
-        common, batch, seq_len, q_heads, kv_heads, head_dim
+        common, batch, seq_len, q_heads, kv_heads, head_dim, cache_offset
     )
     target = slice(offset, offset + seq_len)
 
@@ -174,6 +175,7 @@ def _benchmark_shape(common, ops, shape, args):
         "q_heads": q_heads,
         "kv_heads": kv_heads,
         "head_dim": head_dim,
+        "cache_offset": offset,
         "dtype": "bfloat16",
         "compile_mode": args.compile_mode,
         "comparison_boundary": "split + adjacent-pair RoPE + Q/K/V cache writes",
@@ -231,9 +233,9 @@ def main() -> None:
     )
     device = torch.cuda.get_device_properties(torch.cuda.current_device())
     shapes = [
-        ("pi05_decoder", 1, 10, 8, 1, 256),
-        ("pi05_prefix", 1, 712, 8, 1, 256),
-        ("cross_family_batch2", 2, 16, 8, 2, 128),
+        ("pi05_decoder", 1, 10, 8, 1, 256, 712),
+        ("pi05_prefix", 1, 712, 8, 1, 256, 0),
+        ("cross_family_batch2", 2, 16, 8, 2, 128, 2),
     ]
     results = [_benchmark_shape(common, ops, shape, args) for shape in shapes]
     report = {

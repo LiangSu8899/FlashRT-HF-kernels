@@ -952,12 +952,12 @@ def run_kvcache_shape(
     q_heads: int,
     kv_heads: int,
     head_dim: int,
+    cache_offset: int = 2,
 ) -> None:
     qkv_dim = (q_heads + 2 * kv_heads) * head_dim
     packed = torch.randn((batch, seq_len, qkv_dim), device="cuda", dtype=torch.bfloat16)
     rope = make_interleaved_rope(seq_len, head_dim)
-    max_seq_len = seq_len + 5
-    cache_offset = 2
+    max_seq_len = cache_offset + seq_len + 3
     q_out = torch.empty((batch, seq_len, q_heads, head_dim), device="cuda", dtype=torch.bfloat16)
     k_cache = torch.full(
         (batch, max_seq_len, kv_heads, head_dim), -7.0, device="cuda", dtype=torch.bfloat16
@@ -1483,8 +1483,12 @@ def run(args) -> None:
     torch.manual_seed(31)
     ops = load_source_ops() if args.backend == "source" else load_installed_ops(args.artifact)
     if torch.version.hip is not None:
-        run_kvcache_shape(ops, "pi05_decoder_gqa", 1, 10, 8, 1, 256)
-        run_kvcache_shape(ops, "pi05_prefix_gqa", 1, 712, 8, 1, 256)
+        run_kvcache_shape(
+            ops, "pi05_decoder_gqa", 1, 10, 8, 1, 256, cache_offset=712
+        )
+        run_kvcache_shape(
+            ops, "pi05_prefix_gqa", 1, 712, 8, 1, 256, cache_offset=0
+        )
         run_kvcache_shape(ops, "gqa_batch2", 2, 16, 8, 2, 128)
         run_unaligned_kvcache_fallback(ops, include_fp16=False)
         run_kvcache_compile_capture(ops)
