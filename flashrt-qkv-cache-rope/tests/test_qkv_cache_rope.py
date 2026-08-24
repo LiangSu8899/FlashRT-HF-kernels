@@ -981,10 +981,20 @@ def run_kvcache_shape(
     assert_close_distribution(f"{label}/kvcache_q", q_out, exp_q)
     assert_close_distribution(f"{label}/kvcache_k", k_cache[:, sl], exp_k)
     assert_close_distribution(f"{label}/kvcache_v", v_cache[:, sl], exp_v)
-    if float(k_cache[:, :cache_offset].float().mean().item()) != -7.0:
-        raise AssertionError(f"{label}/kvcache_k_prefix failed: prefix modified")
-    if float(v_cache[:, cache_offset + seq_len :].float().mean().item()) != -9.0:
-        raise AssertionError(f"{label}/kvcache_v_suffix failed: suffix modified")
+    for cache, sentinel, name in (
+        (k_cache, -7.0, "k"),
+        (v_cache, -9.0, "v"),
+    ):
+        prefix = cache[:, :cache_offset]
+        suffix = cache[:, cache_offset + seq_len :]
+        if not torch.equal(prefix, torch.full_like(prefix, sentinel)):
+            raise AssertionError(
+                f"{label}/kvcache_{name}_prefix failed: prefix modified"
+            )
+        if not torch.equal(suffix, torch.full_like(suffix, sentinel)):
+            raise AssertionError(
+                f"{label}/kvcache_{name}_suffix failed: suffix modified"
+            )
 
 
 def run_fp16_kvcache_shape(ops, label: str, seq_len: int, device_position: bool) -> None:
@@ -1055,8 +1065,12 @@ def run_unaligned_kvcache_fallback(ops, *, include_fp16: bool = True) -> None:
         angles = torch.randn((seq_len, head_dim // 2), device="cuda")
         rope.copy_(torch.stack((angles.cos(), angles.sin()), -1).flatten(-2))
         q_out = offset_tensor((batch, seq_len, q_heads, head_dim), dtype)
-        k_cache = offset_tensor((batch, seq_len + 2, kv_heads, head_dim), dtype)
-        v_cache = offset_tensor((batch, seq_len + 2, kv_heads, head_dim), dtype)
+        k_cache = offset_tensor(
+            (batch, seq_len + 2, kv_heads, head_dim), dtype
+        ).fill_(-7.0)
+        v_cache = offset_tensor(
+            (batch, seq_len + 2, kv_heads, head_dim), dtype
+        ).fill_(-9.0)
         method(
             packed, rope, q_heads, kv_heads, head_dim, 1,
             q_out=q_out, k_cache=k_cache, v_cache=v_cache,
@@ -1067,6 +1081,14 @@ def run_unaligned_kvcache_fallback(ops, *, include_fp16: bool = True) -> None:
         assert_close_distribution(f"unaligned/{dtype}/q", q_out, exp_q)
         assert_close_distribution(f"unaligned/{dtype}/k", k_cache[:, 1:4], exp_k)
         assert_close_distribution(f"unaligned/{dtype}/v", v_cache[:, 1:4], exp_v)
+        if not torch.equal(k_cache[:, :1], torch.full_like(k_cache[:, :1], -7.0)):
+            raise AssertionError(f"unaligned/{dtype}/k prefix modified")
+        if not torch.equal(k_cache[:, 4:], torch.full_like(k_cache[:, 4:], -7.0)):
+            raise AssertionError(f"unaligned/{dtype}/k suffix modified")
+        if not torch.equal(v_cache[:, :1], torch.full_like(v_cache[:, :1], -9.0)):
+            raise AssertionError(f"unaligned/{dtype}/v prefix modified")
+        if not torch.equal(v_cache[:, 4:], torch.full_like(v_cache[:, 4:], -9.0)):
+            raise AssertionError(f"unaligned/{dtype}/v suffix modified")
 
 
 def run_kvcache_compile_capture(ops) -> None:
