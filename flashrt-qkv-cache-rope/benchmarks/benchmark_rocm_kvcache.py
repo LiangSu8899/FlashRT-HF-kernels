@@ -13,6 +13,7 @@ import importlib.util
 import json
 import statistics
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -46,6 +47,7 @@ def _paired_device_times(kernel_fn, baseline_fn, warmup: int, iters: int):
     torch.cuda.synchronize()
 
     records = []
+    host_records = []
     for iteration in range(iters):
         order = (
             (("kernel", kernel_fn), ("baseline", baseline_fn))
@@ -53,14 +55,18 @@ def _paired_device_times(kernel_fn, baseline_fn, warmup: int, iters: int):
             else (("baseline", baseline_fn), ("kernel", kernel_fn))
         )
         row = {}
+        host_row = {}
         for name, fn in order:
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
+            host_start = time.perf_counter_ns()
             fn()
+            host_row[name] = (time.perf_counter_ns() - host_start) / 1000
             end.record()
             row[name] = (start, end)
         records.append(row)
+        host_records.append(host_row)
     torch.cuda.synchronize()
 
     kernel_us = [row["kernel"][0].elapsed_time(row["kernel"][1]) * 1000 for row in records]
@@ -69,7 +75,15 @@ def _paired_device_times(kernel_fn, baseline_fn, warmup: int, iters: int):
         for row in records
     ]
     paired_speedups = [b / k for k, b in zip(kernel_us, baseline_us)]
-    return kernel_us, baseline_us, paired_speedups
+    kernel_host_us = [row["kernel"] for row in host_records]
+    baseline_host_us = [row["baseline"] for row in host_records]
+    return (
+        kernel_us,
+        baseline_us,
+        paired_speedups,
+        kernel_host_us,
+        baseline_host_us,
+    )
 
 
 def _make_case(common, batch, seq_len, q_heads, kv_heads, head_dim):
@@ -146,9 +160,13 @@ def _benchmark_shape(common, ops, shape, args):
     worst_p99 = max(item[0] for item in metrics)
     worst_cosine = min(item[1] for item in metrics)
 
-    kernel_us, baseline_us, speedups = _paired_device_times(
-        kernel_fn, baseline_fn, args.warmup, args.iters
-    )
+    (
+        kernel_us,
+        baseline_us,
+        speedups,
+        kernel_host_us,
+        baseline_host_us,
+    ) = _paired_device_times(kernel_fn, baseline_fn, args.warmup, args.iters)
     result = {
         "shape": name,
         "batch": batch,
@@ -165,6 +183,10 @@ def _benchmark_shape(common, ops, shape, args):
         "compiled_baseline_us_median": statistics.median(baseline_us),
         "compiled_baseline_us_p10": _percentile(baseline_us, 0.10),
         "compiled_baseline_us_p90": _percentile(baseline_us, 0.90),
+        "kernel_host_submit_us_median": statistics.median(kernel_host_us),
+        "compiled_baseline_host_submit_us_median": statistics.median(
+            baseline_host_us
+        ),
         "paired_speedup_median": statistics.median(speedups),
         "paired_speedup_p10": _percentile(speedups, 0.10),
         "paired_speedup_p90": _percentile(speedups, 0.90),
